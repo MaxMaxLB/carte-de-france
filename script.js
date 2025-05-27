@@ -38,7 +38,14 @@ let colorByRep = {}; // Dictionnaire { 'Jean': '#ff0000', 'Alice': '#00ff00' }
 let deptInfo = {}; // Ex: { "75": { rep: "Jean", douz: 14, unit: 5 } }
 let selectedLayer = null;
 let repStats = {}; // { "Dupont": { nbClients: 0 } }
+let deptLayers = {}; // Stocke chaque layer par code département
 
+let emptyDepts = []; // Stocke les départements vides
+let deptExceptionReps = {}; // Ex : { '12': 'Dupont', '21': 'Martin', ... }
+try {
+  const saved = localStorage.getItem('deptExceptionReps');
+  if (saved) deptExceptionReps = JSON.parse(saved);
+} catch (e) { deptExceptionReps = {}; }
 
 function getRandomColor() {
   return "#" + Math.floor(Math.random() * 16777215).toString(16);
@@ -89,6 +96,93 @@ function updateDeptInfo(nom, numero, info) {
   }
 }
 
+function updateDeptClientsList(deptCode) {
+  const dropdown = document.getElementById('client-dropdown');
+  const detail = document.getElementById('client-detail');
+  dropdown.innerHTML = '<option value="">Sélectionnez un client</option>';
+  detail.innerHTML = '';
+
+  if (!deptCode) return;
+
+  // Récupère tous les clients du département sélectionné
+  const clients = clientsList.filter(row => getDeptCodeFromPostal(row.CODI) === deptCode);
+
+  clients.forEach((row, idx) => {
+    const opt = document.createElement('option');
+    opt.value = idx;
+    opt.textContent = `${row.CLIENT} (${row.CODI})`;
+    dropdown.appendChild(opt);
+  });
+
+  dropdown.onchange = function () {
+    if (this.value === "") {
+      detail.innerHTML = "";
+      return;
+    }
+    const row = clients[this.value];
+    detail.innerHTML = `
+      <b>${row.CLIENT}</b><br>
+      Code postal : ${row.CODI}<br>
+      Représentant : ${row.REPRES}<br>
+      Douzaines : ${row.DOTZENES || 0}<br>
+      Unités : ${row.UNITATS || 0}<br>
+      Base : ${(row.BASE || 0).toLocaleString('fr-FR', { minimumFractionDigits: 2, maximumFractionDigits: 2 })} €
+    `;
+  };
+}
+
+function updateExceptionsPanel() {
+  const container = document.getElementById('exceptions-list');
+  container.innerHTML = '';
+
+  emptyDepts.forEach(deptCode => {
+    // Nom du département
+    const feature = departementData.features.find(f => f.properties.code === deptCode);
+    const nom = feature ? feature.properties.nom : deptCode;
+    // Menu déroulant de représentants
+    const select = document.createElement('select');
+    select.style.marginLeft = "10px";
+    select.innerHTML = `<option value="">Aucun</option>`;
+    Object.keys(colorByRep).forEach(rep => {
+      select.innerHTML += `<option value="${rep}">${rep}</option>`;
+    });
+
+    // Si déjà une affectation d’exception, on la réaffiche
+    if (deptExceptionReps[deptCode]) select.value = deptExceptionReps[deptCode];
+
+    select.addEventListener('change', function () {
+      // Mets à jour l'exception dans le tableau global
+      if (this.value) {
+        deptExceptionReps[deptCode] = this.value;
+      } else {
+        delete deptExceptionReps[deptCode];
+      }
+
+      // (Option) Persistance locale :
+      localStorage.setItem('deptExceptionReps', JSON.stringify(deptExceptionReps));
+
+      // Ne change deptInfo QUE si aucun client :
+      if (!deptInfo[deptCode] || deptInfo[deptCode].nbClients === 0) {
+        if (!deptInfo[deptCode]) deptInfo[deptCode] = { rep: null, douz: 0, unit: 0, nbClients: 0, base: 0 };
+        deptInfo[deptCode].rep = this.value || null;
+
+        // Met à jour la couleur du département sur la carte
+        const layer = deptLayers[deptCode];
+        if (layer) {
+          let rep = deptExceptionReps[deptCode];
+          layer.setStyle({ fillColor: rep ? colorByRep[rep] : "#ccc" });
+        }
+      }
+    });
+
+    const div = document.createElement('div');
+    div.style.marginBottom = "8px";
+    div.innerHTML = `<b>${deptCode}</b> - ${nom}`;
+    div.appendChild(select);
+    container.appendChild(div);
+  });
+}
+
 
 // Lorsqu’un fichier Excel est chargé
 document.getElementById('file-input').addEventListener('change', function (e) {
@@ -100,6 +194,8 @@ document.getElementById('file-input').addEventListener('change', function (e) {
     const workbook = XLSX.read(data, { type: 'array' });
     const sheet = workbook.Sheets[workbook.SheetNames[0]];
     const json = XLSX.utils.sheet_to_json(sheet);
+    clientsList = json;
+
 
     // Création du mapping département -> représentant
     // 1. Extraire la liste des représentants uniques
@@ -143,7 +239,33 @@ document.getElementById('file-input').addEventListener('change', function (e) {
         deptInfo[deptCode].base += baseVal;
       }
     });
+    // Construire le menu des départements sans clients
+    const allDepts = departementData.features.map(f => f.properties.code);
+    emptyDepts = allDepts.filter(code => !deptInfo[code] || !deptInfo[code].nbClients || deptInfo[code].nbClients === 0);
 
+    updateExceptionsPanel();
+    //Pour minimser ce Menu
+    const exceptionsHeader = document.getElementById('exceptions-header');
+    const exceptionsList = document.getElementById('exceptions-list');
+    const exceptionsPanel = document.getElementById('exceptions-panel');
+    const exceptionsToggle = document.getElementById('exceptions-toggle');
+
+    let exceptionsMinimized = false;
+
+    exceptionsHeader.addEventListener('click', function () {
+      exceptionsMinimized = !exceptionsMinimized;
+      if (exceptionsMinimized) {
+        exceptionsList.style.display = "none";
+        exceptionsToggle.innerHTML = "&#9654;"; // flèche droite
+        exceptionsPanel.style.minWidth = "0";
+        exceptionsPanel.style.width = "fit-content";
+      } else {
+        exceptionsList.style.display = "block";
+        exceptionsToggle.innerHTML = "&#9660;"; // flèche bas
+        exceptionsPanel.style.minWidth = "280px";
+        exceptionsPanel.style.width = "";
+      }
+    });
 
     // 4. Mettre à jour la légende
     updateLegend(colorByRep, repStats);
@@ -153,29 +275,74 @@ document.getElementById('file-input').addEventListener('change', function (e) {
       style: feature => {
         const code = feature.properties.code;
         const info = deptInfo[code];
+        let rep = null;
+        if (info && info.nbClients > 0 && info.rep) {
+          rep = info.rep; // priorité au client réel
+        } else if (deptExceptionReps[code]) {
+          rep = deptExceptionReps[code];
+        }
         return {
           color: "#333",
           weight: 1,
           fillOpacity: 0.4,
-          fillColor: info ? colorByRep[info.rep] : "#ccc"
+          fillColor: rep ? colorByRep[rep] : "#ccc"
         };
-      },
+      }
+      ,
       onEachFeature: (feature, layer) => {
-        const code = feature.properties.code;           // numéro (ex: 75, 2A, 2B)
+        const code = feature.properties.code;
         const nom = feature.properties.nom || "Inconnu";
         const info = deptInfo[code];
+
+        // Enregistre chaque layer par code pour y accéder facilement
+        deptLayers[code] = layer;
+
         layer.on('click', function () {
-          // Optionnel : gestion surbrillance si besoin
           if (selectedLayer) selectedLayer.setStyle({ weight: 1, color: '#333' });
           layer.setStyle({ weight: 3, color: '#111' });
           selectedLayer = layer;
-
-          updateDeptInfo(nom, code, info);  // <---- on passe le numéro ici
+          updateDeptInfo(nom, code, info);
+          updateDeptClientsList(code); // deptCode = ex: "75", "2A"
         });
       }
-
     }).addTo(map);
   };
+  const deptSearchInput = document.getElementById('dept-search');
+
+  deptSearchInput.addEventListener('input', function () {
+    const deptCode = this.value.trim().toUpperCase().padStart(2, '0'); // ex "07", "2A"...
+
+    // Vérifie l'existence du département
+    if (!deptCode || !(deptCode in deptLayers)) {
+      // Enlève le surlignage précédent
+      if (selectedLayer) selectedLayer.setStyle({ weight: 1, color: '#333' });
+      selectedLayer = null;
+      // Vide l'infopanel et le menu client
+      updateDeptInfo('', '', null);
+      updateDeptClientsList();
+      return;
+    }
+
+    // Retire la sélection précédente si elle est différente
+    if (selectedLayer && selectedLayer !== deptLayers[deptCode]) selectedLayer.setStyle({ weight: 1, color: '#333' });
+
+    // Surligne le nouveau département sélectionné
+    const layer = deptLayers[deptCode];
+    layer.setStyle({ weight: 4, color: '#F00' });
+    selectedLayer = layer;
+
+    // Affiche les infos du département
+    const nom = layer.feature.properties.nom || "Inconnu";
+    const info = deptInfo[deptCode];
+    updateDeptInfo(nom, deptCode, info);
+
+    // Met à jour la liste des clients du département
+    updateDeptClientsList(deptCode);
+
+    // Centre la carte sur le département
+    map.fitBounds(layer.getBounds());
+  });
+
 
   reader.readAsArrayBuffer(file);
 });
